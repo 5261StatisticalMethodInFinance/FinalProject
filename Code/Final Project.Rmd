@@ -1,0 +1,548 @@
+---
+title: "GR5261 Final Project"
+author: "Group"
+date: "2018.12.17"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r}
+packages.used=c("dplyr", "moments","tstools","TSA","ggplot2","copula","quadprog")
+
+# check packages that need to be installed.
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+
+
+```
+
+```{r,warning=FALSE}
+library(dplyr)
+library(moments)
+library(tstools)
+library(TSA)
+library(ggplot2)
+library(copula)
+library(quadprog)
+```
+
+# Data Preparation
+
+```{r}
+# Loaded raw data and calculate return of each assets
+raw <- read.csv("../data/Assets.csv")
+raw <- raw[,-12]
+dim(raw) # 60 * 12
+raw1 <- raw[-60,]
+raw2 <- raw[-1,]
+netret <- raw2[,-1]/raw1[,-1]-1
+logret <- log(netret+1)
+netret$Date <- raw$Date[-1]
+logret$Date <- raw$Date[-1]
+
+
+### read  asset data
+df <- read.csv("../data/Assets.csv")
+TenAssets <- df[,2:11]
+### Assumes that the log return of the assets follows a normal distribution, so we need to find out the log return of the ten assets
+ReturnTenAssets <- apply(log(TenAssets),2,diff)
+
+
+# SP500ETF returns (as market portfolio)
+sp <- read.csv("../data/Assets.csv")
+sp <- sp$SP500ETF
+sp.netret <- sp[-1]/sp[-60]-1
+sp.logret <- log(sp.netret+1)
+
+# Risk free asset
+rf <- read.csv("../data/Risk Free Rate.csv")
+rf <- rf$X4.week.Treasury.bill.secondary.market.rate...discount.basis
+rf <- rf[-1:-6]
+rf <- rf[-60]
+rf <- as.numeric(paste(rf))/100
+rf.netret <- (1+rf)^(1/12)-1
+rf.logret <- log(rf.netret+1)
+risk_free_rate <- mean(rf.logret)
+```
+
+# 2. Descriptive Statistics
+## Mean, sd, skewness, kurtoisis, beta
+```{r}
+descriptive <- matrix(NA, nrow = 5, ncol = 10)
+y <- matrix(NA, 59, 11)
+for (i in 1:10){
+  descriptive[1, i] <- mean(logret[,i])
+  descriptive[2, i] <- sqrt(var(logret[,i]))
+  descriptive[3, i] <- skewness(logret[,i])
+  descriptive[4, i] <- kurtosis(logret[,i])
+  premium <- sp.logret - rf.logret
+  y[,i] <- logret[,i] - rf.logret
+  descriptive[5, i] <- as.numeric(lm(y[,i]~premium-1)$coefficients)
+}
+descriptive <- data.frame(descriptive)
+colnames(descriptive) <- names(logret[1:10])
+rownames(descriptive) <- c("Mean", "Standard Deviation", "Skewness", "Kurtosis", "Beta")
+```
+
+## Plot prices and returns
+```{r}
+ts.data <- ts(logret[,-11],start = c(2013,1), frequency = 12)
+ts.raw <- ts(raw[,-1],start = c(2013,1), frequency = 12)
+tt <- init_tsplot_theme(use_box = T)
+for ( i in 1:10) {
+  tt$lty <- c(1,3)
+  tsplot(price = ts.raw[,i], tsr = ts.data[,i],theme = tt)
+}
+```
+
+## Do the same for S&P 500/ compare it with assets
+```{r}
+tt <- init_tsplot_theme(use_box = T)
+tt$lty <- c(1,3)
+tsplot(price = ts(sp,start = c(2013,1), frequency = 12), tsr = ts(sp.logret,start = c(2013,1), frequency = 12), theme = tt)
+```
+
+## Histogram, boxplots, qq-plots, for each returns; 
+```{r}
+for (i in 1:10) {
+  hist(logret[,i], xlab = 'Returns', main = paste("Histogram of" , names(logret[i])))
+}
+
+for (i in 1:10) {
+  boxplot(logret[,i],  main = paste("boxplot of" , names(logret[i])))
+}
+
+for (i in 1:10) {
+  qqnorm(logret[,i],  main = paste("Q-Q Plot of" , names(logret[i])))
+}
+```
+
+## Construct pairwise scatter plots
+```{r}
+pairs(logret[1:10], gap = 0, pch = ".")
+```
+
+## Compute sample covariance matrix of returns on assets
+```{r}
+covariance <- cov(logret[1:10])
+covariance
+```
+
+# 3. Portfolio Theory
+## Markowitz approach
+```{r}
+mean_vect <- colMeans(ReturnTenAssets)
+cov_mat <- cov(ReturnTenAssets)
+sd_vect <- sqrt(diag(cov_mat))
+```
+### With shortsell
+```{r}
+#### no constraints on weights
+M = length(mean_vect)
+library(quadprog)
+Amat = cbind(rep(1,M),mean_vect)
+# The minimum and maximum returns that could be obtained are as follows
+min_return <- -max(abs(mean_vect))-0.02
+max_return <- max(abs(mean_vect))+0.02
+muP = seq(min_return,max_return,length=50)
+sdP = rep(0,50)
+weights = matrix(0,nrow=50,ncol=M)
+for (i in 1:length(muP))
+{
+result =
+solve.QP(Dmat=cov_mat,dvec=rep(0,M), Amat=Amat,
+c(1,muP[i]), meq=2)
+sdP[i] = sqrt(2*result$value)
+weights[i,] = result$solution
+}
+plot(sdP,muP,type="l",xlim=c(min(sdP)-0.025,max(sdP)+0.025),ylim=c(min(muP)-0.01,max(muP)+0.01))
+
+mufree = risk_free_rate
+points(0,mufree,cex=3,col="blue",pch="*")
+sharpe =(muP-mufree)/sdP
+ind = (sharpe == max(sharpe)) # locates the tangency portfolio
+# weights of the tangency portfolio
+tangency_portfolio_withSS <- weights[ind,] 
+lines(c(0,sdP[ind]),c(mufree,muP[ind]),col="red",lwd=3)
+points(sdP[ind],muP[ind],col="blue",cex=3,pch="*")
+ind2 = (sdP == min(sdP))
+MVP_withSS <- weights[ind2,] 
+points(sdP[ind2],muP[ind2],col="green",cex=3,pch="*")
+ind3 = (muP > muP[ind2])
+lines(sdP[ind3],muP[ind3],type="l",xlim=c(0,.25),
+ylim=c(0,.3),col="cyan",lwd=3)
+
+legend("topright",c("efficient frontier","efficient portfolios",
+ "tangency portfolio","min var portfolio"),
+ lty=c(1,1,NA,NA),
+ lwd=c(3,3,1,1),
+ pch=c("","","*","*"),col=c("cyan","red","blue","green")
+ )
+```
+
+### Without shortsell
+```{r}
+#### constraints on weights: all of the w is larger and equal than 0
+Amat = cbind(rep(1,M),mean_vect,diag(1,nrow=M),diag(-1,nrow=M))
+### Because of the constraints, the minimum and maximum returns that could be obtained are as follows
+min_return2 <- min(mean_vect)
+max_return2 <- max(mean_vect)
+muP = seq(min_return2,max_return2,length=50)
+sdP = rep(0,50)
+weights = matrix(0,nrow=50,ncol=M)
+for (i in 1:length(muP))
+{
+result =
+solve.QP(Dmat=cov_mat,dvec=rep(0,M), Amat=Amat,
+c(1,muP[i],rep(0,M),rep(-1,M)), meq=2)
+sdP[i] = sqrt(2*result$value)
+weights[i,] = result$solution
+}
+plot(sdP,muP,type="l",xlim=c(min(sdP)-0.02,max(sdP)+0.02),ylim=c(min(muP)-0.02,max(muP)+0.02))
+mufree = risk_free_rate
+points(0,mufree,cex=3,col="blue",pch="*")
+sharpe =(muP-mufree)/sdP
+ind_con = (sharpe == max(sharpe)) # locates the tangency portfolio
+tangency_portfolio_withoutSS <- weights[ind_con,] # weights of the tangency portfolio
+lines(c(0,sdP[ind_con]),c(mufree,muP[ind_con]),col="red",lwd=3)
+points(sdP[ind_con],muP[ind_con],col="blue",cex=3,pch="*")
+ind2_con = (sdP == min(sdP))
+MVP_withoutSS <- weights[ind2_con,]
+points(sdP[ind2_con],muP[ind2_con],col="green",cex=3,pch="*")
+ind3_con = (muP > muP[ind2_con])
+lines(sdP[ind3_con],muP[ind3_con],type="l",xlim=c(0,.25),
+
+      ylim=c(0,.3),col="cyan",lwd=3)
+legend("topright",c("efficient frontier","efficient portfolios",
+"tangency portfolio","min var portfolio"),
+lty=c(1,1,NA,NA),
+lwd=c(3,3,1,1),
+pch=c("","","*","*"),col=c("cyan","red","blue","green"),
+pt.cex=c(1,1,3,3)
+)
+```
+
+```{r}
+# without shortsale
+# weights of minimum variance portfolio
+MVP_withoutSS
+# weights of tangency portfolio
+tangency_portfolio_withoutSS
+
+# with shortsale
+# weights of minimum variance portfolio
+MVP_withSS
+# weights of tangency portfolio
+tangency_portfolio_withSS
+```
+
+# 4. Asset Allocation
+```{r}
+# Calculate the return of two tangency portfolios
+tanretws <- tangency_portfolio_withSS %*% mean_vect
+tanretwos <- tangency_portfolio_withoutSS %*% mean_vect
+weights_tan_ws <- (0.005 - risk_free_rate) / (tanretws - risk_free_rate)
+weights_tan_wos <- (0.005 - risk_free_rate) / (tanretwos - risk_free_rate)
+round(rep(weights_tan_ws,10) * tangency_portfolio_withSS, 4)
+round(rep(weights_tan_wos,10) * tangency_portfolio_withoutSS, 4)
+```
+
+# 5. Principle Component Analysis
+```{r}
+round(cor(ReturnTenAssets),4)
+```
+
+```{r}
+eig <- eigen(cor(ReturnTenAssets))
+#eig
+
+#### conduct PCA
+pca <- princomp(ReturnTenAssets,cor=TRUE)
+
+pca$loadings
+summary(pca)
+```
+
+```{r}
+
+### plot for PCA
+pca1 <- pca$loadings[,1]
+pca5 <- pca$loadings[,5]
+pca10 <- pca$loadings[,10]
+
+dfPCA <- cbind(ReturnTenAssets%*%pca1,ReturnTenAssets%*%pca5,ReturnTenAssets%*%pca10)
+
+dfRTA <- as.data.frame(cbind(1:59,ReturnTenAssets,dfPCA))
+ggplot(data=dfRTA)+
+  geom_line(mapping = aes(x = V1, y = V12,colour="PC01"))+
+  geom_line(mapping = aes(x = V1, y = V13,colour="PC05"))+
+  geom_line(mapping = aes(x = V1, y = V14,colour="PC10"))+
+  labs(title = "PCA", x = "Month Index", y = "Principle Component")
+  
+
+### interpret PCA (first several to get 95% covariance, interpret the first three principle components)
+
+
+
+### choose a protfolio based on the first principle components
+### names: market factor portfolio
+pca1 <- pca$loadings[,1]
+PCA_weight <- pca1/sum(pca1)
+
+
+```
+
+## Factor Model
+```{r}
+### Fama 3 Factor Model
+#### Here we use factor data from French's data library
+### We use percent log return
+FactorReturn <- 100*ReturnTenAssets
+
+FactorAnalysis <- read.csv("../data/Factor.csv")
+### Response: percent log return minus risk-free rate
+Response <- FactorReturn-FactorAnalysis$RF
+
+### First factor
+# RM is the value_weighted monthly percent return on all the stocks minus one-month Treasury bill rate
+RMRF <- FactorAnalysis$Mkt.RF
+### Second factor
+SMB <- FactorAnalysis$SMB
+### Third factor
+HML <- FactorAnalysis$HML
+
+Apple <- lm(Response[,1]~RMRF+SMB+HML)
+Apple
+summary(Apple)
+
+Delta <- lm(Response[,2]~RMRF+SMB+HML)
+Delta
+summary(Delta)
+
+Exxon <- lm(Response[,3]~RMRF+SMB+HML)
+Exxon
+summary(Exxon)
+
+GE <- lm(Response[,4]~RMRF+SMB+HML)
+GE
+summary(GE)
+
+Honda <- lm(Response[,5]~RMRF+SMB+HML)
+Honda
+summary(Honda)
+
+USSteel <- lm(Response[,6]~RMRF+SMB+HML)
+USSteel
+summary(USSteel)
+
+Verizon <- lm(Response[,7]~RMRF+SMB+HML)
+Verizon
+summary(Verizon)
+
+Walmart <- lm(Response[,8]~RMRF+SMB+HML)
+Walmart
+summary(Walmart)
+
+CEA <- lm(Response[,9]~RMRF+SMB+HML)
+CEA
+summary(CEA)
+
+Infosys <- lm(Response[,10]~RMRF+SMB+HML)
+Infosys
+summary(Infosys)
+
+```
+
+```{r}
+round(PCA_weight, 4)
+```
+
+# 6. Risk Management
+```{r}
+# Now we have seven portfolio in total.
+PortfolioWeights <- matrix(NA, nrow = 7, ncol = 10)
+PortfolioWeights[1,] <- round(MVP_withSS,4)
+PortfolioWeights[2,] <- round(MVP_withoutSS,4)
+PortfolioWeights[3,] <- round(tangency_portfolio_withSS,4)
+PortfolioWeights[4,] <- round(tangency_portfolio_withoutSS,4)
+PortfolioWeights[5,] <- round(PCA_weight,4)
+PortfolioWeights[6,] <- round(rep(weights_tan_ws,10) * tangency_portfolio_withSS,4)
+PortfolioWeights[7,] <- round(rep(weights_tan_wos,10) * tangency_portfolio_withoutSS,4)
+colnames(PortfolioWeights) <- colnames(logret)[1:10]
+rownames(PortfolioWeights) <- c("MVP with short", "MVP without short", "tangency with short", "tangency without short", "PCA", "Combination with short", "Combination without short")
+weights_tan_ws
+weights_tan_wos
+```
+
+```{r}
+CalRisk <- function(weights){
+  mu <- as.numeric(descriptive[1,]) %*% as.matrix(as.numeric(weights), nrow = 10)
+  sd <- sqrt(t(as.matrix(as.numeric(weights), nrow = 10)) %*% covariance %*%      
+               as.matrix(as.numeric(weights), nrow = 10))
+  annualmu <- 12 * mu
+  annualsd <- sqrt(12) * sd
+  normoutput <- qnorm(0.05)
+  St <- 100000
+  VaR <- St*(1-exp(mu+normoutput*sd))
+  phi <- pnorm(normoutput-sd)
+  ES <- St*(1-exp(mu+sd^2/2)*phi/0.05)
+  portfolio_actual_ret <- as.matrix(logret[,1:10]) %*% 
+    as.matrix(as.numeric(weights), nrow = 10)
+  NPVaR <- -100000 * (exp(sort(portfolio_actual_ret)[3])-1)
+  NPES <- -100000 * (exp((sort(portfolio_actual_ret)[3]
+                         +sort(portfolio_actual_ret)[2]
+                         +sort(portfolio_actual_ret)[1])/3)-1)
+  SharpeRatio <- (mu - risk_free_rate) / sd
+  return(c(mu, annualmu, sd, annualsd, VaR, ES, NPVaR, NPES, SharpeRatio))
+}
+```
+
+```{r}
+RiskParameter <- matrix(NA, nrow = 7, ncol = 9)
+RiskParameter[1,] <- CalRisk(MVP_withSS)
+RiskParameter[2,] <- CalRisk(MVP_withoutSS)
+RiskParameter[3,] <- CalRisk(tangency_portfolio_withSS)
+RiskParameter[4,] <- CalRisk(tangency_portfolio_withoutSS)
+RiskParameter[5,] <- CalRisk(PCA_weight)
+
+colnames(RiskParameter) <- c("monthlymean_ret", "yearlymean_ret", "monthlysd", "yearlysd", "5% VaR", "5% Expected Shortfall", "5% NPVaR", "5% NPExpected Shortfall", "Sharpe Ratio")
+rownames(RiskParameter) <- c("MVP with short", "MVP without short", "tangency with short", "tangency without short", "PCA", "Combination with short", "Combination without short")
+```
+
+```{r}
+# For portfolio combination with risk-free asset, in the actual data, risk-free asset also have volatility
+CalRisk02 <- function(weights, weight02){
+  mu <- as.numeric(descriptive[1,]) %*% as.matrix(as.numeric(weights), nrow = 10) + (1-weight02) * risk_free_rate
+  sd <- sqrt(t(as.matrix(as.numeric(weights), nrow = 10)) %*% covariance %*%      
+               as.matrix(as.numeric(weights), nrow = 10) + (1-weight02) * (1-weight02) * var(rf.logret))
+  annualmu <- 12 * mu
+  annualsd <- sqrt(12) * sd
+  normoutput <- qnorm(0.05)
+  St <- 100000
+  VaR <- St*(1-exp(mu+normoutput*sd))
+  phi <- pnorm(normoutput-sd)
+  ES <- St*(1-exp(mu+sd^2/2)*phi/0.05)
+  portfolio_actual_ret <- as.matrix(logret[,1:10]) %*% 
+    as.matrix(as.numeric(weights), nrow = 10) + rep((1-weight02),59) * rf.logret
+  NPVaR <- -100000 * (exp(sort(portfolio_actual_ret)[3])-1)
+  NPES <- -100000 * (exp((sort(portfolio_actual_ret)[3]
+                         +sort(portfolio_actual_ret)[2]
+                         +sort(portfolio_actual_ret)[1])/3)-1)
+  SharpeRatio <- (mu - risk_free_rate) / sd
+  return(c(mu, annualmu, sd, annualsd, VaR, ES, NPVaR, NPES, SharpeRatio))
+}
+```
+
+```{r}
+RiskParameter[6,] <- CalRisk02(rep(weights_tan_ws,10) * tangency_portfolio_withSS, weights_tan_ws)
+RiskParameter[7,] <- CalRisk02(rep(weights_tan_wos,10) * tangency_portfolio_withoutSS, weights_tan_wos)
+```
+
+## Bootstrap
+```{r}
+CalVarES1 <- function(portfolio){
+  mu <- mean(portfolio)
+  std <- sd(portfolio)
+  normoutput <- qnorm(0.05)
+  St <- 100000
+  var <- St*(1-exp(mu+normoutput*std))
+  
+  phi <- pnorm(normoutput-std)
+  
+  ES <- St*(1-exp(mu+std^2/2)*phi/0.05)
+  ES
+  return(c(var,ES))
+}
+## function to calculate sde and 95% CI for var and ES based on bootstrap
+CB <- function(port){
+  varlist <- rep(NA,250)
+  ESlist <- rep(NA,250)
+  for (B in 1:250){
+    index <- sample(1:length(port),replace=T)
+    newPort <- port[index,]
+    varlist[B] <- CalVarES1(newPort)[1]
+    ESlist[B] <- CalVarES1(newPort)[2] 
+  }
+  sdeVar <- sd(varlist)
+  sdeES <- sd(ESlist)
+  var <- CalVarES1(port)[1]
+  ES <- CalVarES1(port)[2]
+  CIVar <- c(2*var-quantile(varlist,0.95),2*var-quantile(varlist,0.05))
+  CIES <- c(2*ES-quantile(ESlist,0.95),2*ES-quantile(ESlist,0.05))
+  return(c(sdeVar = sdeVar,sdeES = sdeES,CIVar= CIVar,CIES = CIES))
+  
+}
+```
+
+```{r}
+BSOutput <- matrix(NA, nrow = 7, ncol = 6)
+BSOutput[1,] <- CB(as.matrix(logret[,1:10]) %*% as.matrix(MVP_withSS, nrow = 10))
+BSOutput[2,] <- CB(as.matrix(logret[,1:10]) %*% as.matrix(MVP_withoutSS, nrow = 10))
+BSOutput[3,] <- CB(as.matrix(logret[,1:10]) %*% as.matrix(tangency_portfolio_withSS, nrow = 10))
+
+BSOutput[4,] <- CB(as.matrix(logret[,1:10]) %*% as.matrix(tangency_portfolio_withoutSS, nrow = 10))
+BSOutput[5,] <- CB(as.matrix(logret[,1:10]) %*% as.matrix(PCA_weight, nrow = 10))
+BSOutput[6,] <- CB(as.matrix(logret[,1:10]) %*% 
+    as.matrix(as.numeric(rep(weights_tan_ws,10) * tangency_portfolio_withSS), nrow = 10) + rep((1-weights_tan_ws),59)* rf.logret)
+BSOutput[7,] <- CB(as.matrix(logret[,1:10]) %*% 
+    as.matrix(as.numeric(rep(weights_tan_wos,10) * tangency_portfolio_withoutSS), nrow = 10) + rep((1-weights_tan_wos),59) * rf.logret)
+colnames(BSOutput) <- c("sdeVar", "sdeES", "CIVar.95%", "CIVar.5%", "CIES.95%", "CIES.5%")
+rownames(BSOutput) <- c("MVP with short", "MVP without short", "tangency with short", "tangency without short", "PCA", "Combination with short", "Combination without short")
+```
+
+# 7. Copulas
+```{r}
+## different copulas
+## normal, t, clayon, gumbel,frank, joe
+## gumbel and joe: can't have negative dependence
+## clayton: remove points with small values of U1 and U2
+### psuedo maximal likelihood method
+### transfrom data to empirical CDFs so the first step is a nonparametric method in pseudo-Maximum likelihood
+edata <- cbind(rank(ReturnTenAssets[,1])/60,rank(ReturnTenAssets[,2])/60,rank(ReturnTenAssets[,3])/60,rank(ReturnTenAssets[,4])/60,rank(ReturnTenAssets[,5])/60,rank(ReturnTenAssets[,6])/60,rank(ReturnTenAssets[,7])/60,rank(ReturnTenAssets[,8])/60,rank(ReturnTenAssets[,9])/60,rank(ReturnTenAssets[,10])/60)
+ncop <- normalCopula(dim=10,dispstr="un")
+Cnorm <- fitCopula(data=edata,copula=ncop,method="mpl")
+AIC(Cnorm)
+
+### t copoula
+tcop <- tCopula(dim=10,dispstr="un")
+Ct <- fitCopula(data=edata,copula=tcop,method="mpl")
+AIC(Ct)
+
+### Gumbel copula
+Glcop <- archmCopula(family="gumbel",dim=10,param=2)
+Cgumbel <- fitCopula(data=edata,copula=Glcop,method="mpl")
+AIC(Cgumbel)
+
+### Joe copula
+Jcop <- archmCopula(family="joe",dim=10,param=2)
+Cj <- fitCopula(data=edata,copula=Jcop,method="mpl")
+AIC(Cj)
+
+### Clayton copula
+Clcop <- archmCopula(family="clayton",dim=10,param=2)
+Ccl <- fitCopula(data=edata,copula=Clcop,method="ml")
+AIC(Ccl)
+
+### Frank copula
+fcop <- archmCopula(family="frank",dim=10,param=2)
+Cf <- fitCopula(data=edata,copula=fcop,method="ml")
+AIC(Cf)
+
+## For Gumbel and Joe copula, the dependence should be larger and equal than 0. 
+##However, we have negative dependence on the returns, and this function automatically replace these with 0, but actually we should not consider it as the copula for our real data.
+## Choose Clayton copula.
+a <-c(AIC(Cnorm),AIC(Ct),AIC(Cgumbel),AIC(Cj),AIC(Ccl),AIC(Cf))
+names(a) <- c("Normal Copula","T Copula","Gumbel Copula","Joe Copula","Clayton Copula","Frank Copula")
+
+a
+
+```
+
+
+
